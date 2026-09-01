@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Support Tickets</title>
+  <style>
+    body { font-family: -apple-system, Arial, sans-serif; max-width: 960px; margin: 40px auto; color: #222; }
+    h1 { font-size: 22px; }
+    .hint { color: #777; font-size: 13px; margin-top: 4px; }
+    .layout { display: flex; gap: 28px; margin-top: 20px; align-items: flex-start; }
+    .col-left { flex: 1; min-width: 0; }
+    .col-right { flex: 1.3; min-width: 0; }
+    label { display: block; margin-top: 14px; font-weight: 600; }
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%; padding: 8px; margin-top: 6px; box-sizing: border-box; font-size: 14px;
+    }
+    textarea { resize: vertical; min-height: 60px; }
+    button { margin-top: 14px; padding: 8px 16px; cursor: pointer; }
+    .msg { margin-top: 10px; font-size: 13px; color: #c00; min-height: 16px; }
+    .ticket-card {
+      border: 1px solid #ddd; border-radius: 6px; padding: 12px 14px; margin-bottom: 10px;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .ticket-card:hover { background: #f6f8ff; }
+    .ticket-card.active { background: #eaf0ff; border-color: #6a8dff; }
+    .ticket-card .t-title { font-weight: 600; font-size: 15px; }
+    .ticket-card .t-meta { font-size: 12px; color: #666; margin-top: 4px; }
+    .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; }
+    .status-open { background: #e3f1ff; color: #1565c0; }
+    .status-in_progress { background: #fff3e0; color: #e65100; }
+    .status-resolved { background: #e8f5e9; color: #2e7d32; }
+    .status-closed { background: #eee; color: #555; }
+    .detail-head { border-bottom: 1px solid #eee; padding-bottom: 12px; margin-bottom: 12px; }
+    .detail-head h2 { font-size: 18px; margin: 0 0 6px 0; }
+    .message {
+      background: #f6f6f6; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
+    }
+    .message .m-author { font-weight: 600; font-size: 13px; }
+    .message .m-time { font-size: 12px; color: #777; margin-left: 8px; }
+    .message .m-body { margin-top: 6px; font-size: 14px; white-space: pre-wrap; }
+    .empty { color: #999; font-size: 14px; padding: 12px 0; }
+    select.status-select { display: inline-block; width: auto; margin: 0; }
+  </style>
+</head>
+<body>
+  <h1>Support Tickets</h1>
+  <p class="hint">Create, view, and reply to support tickets. All data is stored in Lakebase.</p>
+
+  <div class="layout">
+    <div class="col-left">
+      <h2 style="font-size:16px;">New ticket</h2>
+      <form id="create-form">
+        <label for="title">Title</label>
+        <input type="text" id="title" name="title" placeholder="Brief summary of the issue" required>
+        <label for="description">Description</label>
+        <textarea id="description" name="description" placeholder="Describe the problem in detail"></textarea>
+        <button type="submit">Create ticket</button>
+      </form>
+      <div class="msg" id="create-msg"></div>
+
+      <h2 style="font-size:16px; margin-top:28px;">All tickets</h2>
+      <div id="ticket-list"></div>
+      <div class="empty" id="ticket-empty">No tickets yet.</div>
+    </div>
+
+    <div class="col-right">
+      <div id="detail">
+        <div class="empty">Select a ticket to view its messages.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const ticketList = document.getElementById("ticket-list");
+    const ticketEmpty = document.getElementById("ticket-empty");
+    const detailEl = document.getElementById("detail");
+    const createForm = document.getElementById("create-form");
+    const createMsg = document.getElementById("create-msg");
+
+    let selectedId = null;
+    let tickets = [];
+
+    function fmt(ts) {
+      return ts ? new Date(ts).toLocaleString() : "-";
+    }
+
+    function statusBadge(status) {
+      return `<span class="badge status-${status}">${status.replace("_", " ")}</span>`;
+    }
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s == null ? "" : String(s);
+      return d.innerHTML;
+    }
+
+    async function loadTickets() {
+      try {
+        const resp = await fetch("/tickets");
+        tickets = await resp.json();
+        if (!resp.ok) { ticketList.innerHTML = ""; ticketEmpty.textContent = "Error: " + (tickets.error || resp.statusText); return; }
+        ticketList.innerHTML = "";
+        ticketEmpty.style.display = tickets.length ? "none" : "block";
+        tickets.forEach((t) => {
+          const card = document.createElement("div");
+          card.className = "ticket-card" + (t.id === selectedId ? " active" : "");
+          card.innerHTML = `
+            <div class="t-title">${esc(t.title)}</div>
+            <div class="t-meta">#${t.id} &middot; ${esc(t.created_by)} &middot; ${fmt(t.created_at)} ${statusBadge(t.status)}</div>
+          `;
+          card.addEventListener("click", () => selectTicket(t.id));
+          ticketList.appendChild(card);
+        });
+      } catch (err) {
+        ticketList.innerHTML = "";
+        ticketEmpty.textContent = "Failed to load tickets: " + err;
+      }
+    }
+
+    async function selectTicket(id) {
+      selectedId = id;
+      loadTickets();
+      try {
+        const resp = await fetch("/tickets/" + id);
+        const data = await resp.json();
+        if (!resp.ok) { detailEl.innerHTML = `<div class="empty">${esc(data.error || resp.statusText)}</div>`; return; }
+        const t = data.ticket;
+        const msgs = data.messages || [];
+        let html = `
+          <div class="detail-head">
+            <h2>${esc(t.title)}</h2>
+            <div class="t-meta">#${t.id} &middot; created by ${esc(t.created_by)} on ${fmt(t.created_at)} &middot; ${statusBadge(t.status)}</div>
+            ${t.description ? `<div style="margin-top:8px;white-space:pre-wrap;">${esc(t.description)}</div>` : ""}
+          </div>
+          <label style="display:inline-block;margin-top:0;">Update status</label>
+          <select class="status-select" id="status-select">
+            <option value="open">open</option>
+            <option value="in_progress">in_progress</option>
+            <option value="resolved">resolved</option>
+            <option value="closed">closed</option>
+          </select>
+          <div class="msg" id="status-msg"></div>
+          <h2 style="font-size:16px;margin-top:20px;">Messages</h2>
+          <div id="message-list"></div>
+          <form id="message-form" style="margin-top:16px;">
+            <label for="body">Add a message</label>
+            <textarea id="body" name="body" placeholder="Type your reply"></textarea>
+            <button type="submit">Send message</button>
+          </form>
+          <div class="msg" id="message-msg"></div>
+        `;
+        detailEl.innerHTML = html;
+        const selectEl = document.getElementById("status-select");
+        selectEl.value = t.status;
+        selectEl.addEventListener("change", () => updateStatus(id, selectEl.value));
+        const msgList = document.getElementById("message-list");
+        if (!msgs.length) {
+          msgList.innerHTML = `<div class="empty">No messages yet.</div>`;
+        } else {
+          msgList.innerHTML = msgs.map((m) => `
+            <div class="message">
+              <span class="m-author">${esc(m.author)}</span><span class="m-time">${fmt(m.created_at)}</span>
+              <div class="m-body">${esc(m.body)}</div>
+            </div>
+          `).join("");
+        }
+        document.getElementById("message-form").addEventListener("submit", (e) => {
+          e.preventDefault();
+          addMessage(id);
+        });
+      } catch (err) {
+        detailEl.innerHTML = `<div class="empty">Failed to load ticket: ${esc(err)}</div>`;
+      }
+    }
+
+    async function updateStatus(id, status) {
+      const msgEl = document.getElementById("status-msg");
+      try {
+        const resp = await fetch(`/tickets/${id}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { msgEl.textContent = "Error: " + (data.error || resp.statusText); return; }
+        msgEl.textContent = "Status updated to " + data.status;
+        loadTickets();
+      } catch (err) {
+        msgEl.textContent = "Request failed: " + err;
+      }
+    }
+
+    async function addMessage(id) {
+      const body = document.getElementById("body").value.trim();
+      const msgEl = document.getElementById("message-msg");
+      if (!body) return;
+      try {
+        const resp = await fetch(`/tickets/${id}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { msgEl.textContent = "Error: " + (data.error || resp.statusText); return; }
+        document.getElementById("body").value = "";
+        msgEl.textContent = "";
+        selectTicket(id);
+      } catch (err) {
+        msgEl.textContent = "Request failed: " + err;
+      }
+    }
+
+    createForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const title = document.getElementById("title").value.trim();
+      const description = document.getElementById("description").value.trim();
+      if (!title) return;
+      createMsg.textContent = "Creating ticket...";
+      try {
+        const resp = await fetch("/tickets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, description }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { createMsg.textContent = "Error: " + (data.error || resp.statusText); return; }
+        createMsg.textContent = "Created ticket #" + data.id;
+        document.getElementById("title").value = "";
+        document.getElementById("description").value = "";
+        loadTickets();
+        selectTicket(data.id);
+      } catch (err) {
+        createMsg.textContent = "Request failed: " + err;
+      }
+    });
+
+    loadTickets();
+  </script>
+</body>
+</html>
